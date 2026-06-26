@@ -1,0 +1,37 @@
+# Render Blueprint — deploys JobRadar on the FREE plan.
+# In Render: New + > Blueprint > connect this repo. Then fill in the env vars
+# marked "sync: false" (password, email) in the dashboard.
+services:
+  - type: web
+    name: jobradar
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Auto-generated strong key for signing the login cookie
+      - key: SECRET_KEY
+        generateValue: true
+      # OPTIONAL invite code to stop random public signups (set in dashboard)
+      - key: REGISTRATION_CODE
+        sync: false
+      - key: REFRESH_MINUTES
+        value: "30"
+      # --- Email alerts: the SENDING account (each user gets mail at their own
+      #     profile email). Fill these in the dashboard. ---
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      # --- Adzuna (optional: Bangalore/India listings) ---
+      - key: ADZUNA_APP_ID
+        sync: false
+      - key: ADZUNA_APP_KEY
+        sync: false
+      - key: ADZUNA_COUNTRY
+        value: in

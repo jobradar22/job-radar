@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b1120" />
+  <title>JobRadar</title>
+  <!-- PWA: installable on phone home screen -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon-192.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="JobRadar" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+  </script>
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+    .card-enter { animation: pop .25s ease; }
+    @keyframes pop { from { opacity:0; transform: translateY(6px);} to {opacity:1; transform:none;} }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background:#334155; border-radius: 8px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-20 backdrop-blur bg-slate-950/80 border-b border-slate-800">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
+      <div class="text-2xl">🛰️</div>
+      <div class="flex-1 min-w-0">
+        <h1 class="font-bold text-lg leading-tight">JobRadar</h1>
+        <p id="statusline" class="text-xs text-slate-400 truncate">Loading…</p>
+      </div>
+      <button id="refreshBtn" class="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-sm font-medium transition flex items-center gap-2">
+        <span id="refreshSpin" class="hidden animate-spin">⟳</span> Refresh
+      </button>
+      <button id="settingsBtn" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm transition">⚙️</button>
+      <a href="/logout" title="Log out" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm transition">⎋</a>
+    </div>
+
+    <!-- Search + filters -->
+    <div class="max-w-5xl mx-auto px-4 pb-3 flex flex-wrap gap-2">
+      <input id="search" type="search" placeholder="Search title, company…"
+             class="flex-1 min-w-[180px] bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+      <select id="sourceFilter" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+        <option value="">All sources</option>
+      </select>
+      <button data-filter="new_only"   class="filter-chip px-3 py-2 rounded-lg text-sm bg-slate-900 border border-slate-700">🆕 New</button>
+      <button data-filter="saved_only"  class="filter-chip px-3 py-2 rounded-lg text-sm bg-slate-900 border border-slate-700">⭐ Saved</button>
+    </div>
+  </header>
+
+  <!-- Stats strip -->
+  <div class="max-w-5xl mx-auto px-4 pt-4">
+    <div id="stats" class="grid grid-cols-3 gap-2 text-center"></div>
+  </div>
+
+  <!-- Job list -->
+  <main id="list" class="max-w-5xl mx-auto px-4 py-4 space-y-3"></main>
+  <div id="empty" class="hidden text-center text-slate-500 py-20">No jobs match your role yet.<br>Try a broader role in ⚙️ Settings, or hit Refresh.</div>
+
+  <!-- Settings drawer -->
+  <div id="settingsModal" class="hidden fixed inset-0 z-30 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-slate-900 w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl p-5 space-y-4 border border-slate-700">
+      <div class="flex items-center justify-between">
+        <h2 class="font-bold text-lg">Settings</h2>
+        <button id="closeSettings" class="text-slate-400 hover:text-white text-xl">✕</button>
+      </div>
+
+      <label class="block text-sm">
+        <span class="text-slate-300">Job role(s) you want</span>
+        <input id="setRoles" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" placeholder="e.g. python developer" />
+        <span class="text-[11px] text-slate-500">Only jobs whose title matches show up. Separate multiple roles with commas. Blank = all roles.</span>
+      </label>
+
+      <label class="block text-sm">
+        <span class="text-slate-300">Email for alerts</span>
+        <input id="setEmailAddr" type="email" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" placeholder="you@example.com" />
+      </label>
+
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="setRemote" class="w-4 h-4"> Include remote jobs (India-eligible)</label>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="setEmail" class="w-4 h-4"> Email me when new matching jobs appear</label>
+
+      <div class="border-t border-slate-800 pt-3 space-y-2">
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="setWa" class="w-4 h-4"> WhatsApp me (via CallMeBot)</label>
+        <input id="setWaPhone" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" placeholder="WhatsApp number with country code, e.g. +9198XXXXXXXX" />
+        <input id="setWaKey" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" placeholder="CallMeBot API key" />
+        <p class="text-[11px] text-slate-500">One-time setup: WhatsApp <b>“I allow callmebot to send me messages”</b> to <b>+34 644 51 95 23</b>, then paste the API key it replies with. (See README.)</p>
+      </div>
+
+      <button id="saveSettings" class="w-full bg-blue-600 hover:bg-blue-500 rounded-lg py-2.5 font-medium transition">Save & search now</button>
+      <button id="testAlert" class="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg py-2 text-sm transition">📨 Send test alert</button>
+      <p id="settingsMsg" class="text-[11px] text-center min-h-[14px]"></p>
+      <p class="text-[11px] text-slate-500 text-center">📍 Location is fixed: on-site jobs are Bengaluru-only; remote jobs are India-eligible. Email sending needs SMTP in <code>.env</code> (see README).</p>
+    </div>
+  </div>
+
+<script>
+const $ = s => document.querySelector(s);
+const filters = { new_only:false, saved_only:false };
+let ME = { username:"", prefs:{roles:[]} };
+
+async function loadMe(){
+  ME = await (await fetch('/api/me')).json();
+  const role = (ME.prefs.roles||[]).join(", ") || "all roles";
+  $("#statusline").textContent = `${ME.username} · searching: ${role}`;
+}
+
+function timeAgo(iso){
+  if(!iso) return "";
+  const d = (Date.now() - new Date(iso).getTime())/1000;
+  if (d < 60) return "just now";
+  if (d < 3600) return Math.floor(d/60)+"m ago";
+  if (d < 86400) return Math.floor(d/3600)+"h ago";
+  return Math.floor(d/86400)+"d ago";
+}
+const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function loadStats(){
+  const s = await (await fetch('/api/stats')).json();
+  $("#stats").innerHTML = `
+    <div class="bg-slate-900 rounded-xl py-3 border border-slate-800"><div class="text-2xl font-bold">${s.total}</div><div class="text-xs text-slate-400">Jobs</div></div>
+    <div class="bg-slate-900 rounded-xl py-3 border border-slate-800"><div class="text-2xl font-bold text-blue-400">${s.new}</div><div class="text-xs text-slate-400">New</div></div>
+    <div class="bg-slate-900 rounded-xl py-3 border border-slate-800"><div class="text-2xl font-bold text-amber-400">${s.saved}</div><div class="text-xs text-slate-400">Saved</div></div>`;
+  const lr = s.last_run || {};
+  const role = (ME.prefs.roles||[]).join(", ") || "all roles";
+  $("#statusline").textContent =
+    `${ME.username} · ${role} · updated ${timeAgo(lr.at) || '—'}`;
+  // source dropdown
+  const sel = $("#sourceFilter"); const cur = sel.value;
+  sel.innerHTML = '<option value="">All sources</option>' +
+    (s.sources||[]).map(x=>`<option value="${x.source}">${x.source} (${x.c})</option>`).join("");
+  sel.value = cur;
+}
+
+async function loadJobs(){
+  const p = new URLSearchParams();
+  if ($("#search").value) p.set("query", $("#search").value);
+  if ($("#sourceFilter").value) p.set("source", $("#sourceFilter").value);
+  for (const k in filters) if (filters[k]) p.set(k, "true");
+  const jobs = await (await fetch('/api/jobs?'+p)).json();
+
+  $("#empty").classList.toggle("hidden", jobs.length>0);
+  $("#list").innerHTML = jobs.map(j => `
+    <article class="card-enter bg-slate-900 border border-slate-800 rounded-xl p-4 hover:border-slate-600 transition">
+      <div class="flex items-start gap-3">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <a href="${esc(j.url)}" target="_blank" rel="noopener" class="font-semibold text-blue-400 hover:underline">${esc(j.title)}</a>
+            ${j.is_new ? '<span class="text-[10px] bg-blue-600 px-1.5 py-0.5 rounded-full font-bold">NEW</span>':''}
+            ${j.remote ? '<span class="text-[10px] bg-emerald-700/60 px-1.5 py-0.5 rounded-full">REMOTE</span>':''}
+          </div>
+          <div class="text-sm text-slate-300 mt-0.5">${esc(j.company)} <span class="text-slate-500">· ${esc(j.location)||'—'}</span></div>
+          <p class="text-xs text-slate-400 mt-2 line-clamp-2">${esc(j.description).slice(0,220)}</p>
+          <div class="text-[11px] text-slate-500 mt-2">${esc(j.source)} · ${timeAgo(j.fetched_at)}</div>
+        </div>
+        <div class="flex flex-col gap-1 shrink-0">
+          <button onclick="act('${j.id}','${j.saved?'unsave':'save'}')" title="Save"
+            class="w-9 h-9 rounded-lg ${j.saved?'bg-amber-500/20 text-amber-400':'bg-slate-800 hover:bg-slate-700'}">⭐</button>
+          <button onclick="act('${j.id}','dismiss')" title="Hide" class="w-9 h-9 rounded-lg bg-slate-800 hover:bg-slate-700">🗑️</button>
+        </div>
+      </div>
+    </article>`).join("");
+}
+
+async function act(id, action){
+  await fetch(`/api/jobs/${id}/${action}`, {method:'POST'});
+  loadJobs(); loadStats();
+}
+
+async function refresh(){
+  $("#refreshSpin").classList.remove("hidden");
+  $("#refreshBtn").disabled = true;
+  try { await fetch('/api/refresh', {method:'POST'}); }
+  finally {
+    $("#refreshSpin").classList.add("hidden");
+    $("#refreshBtn").disabled = false;
+    await fetch('/api/seen',{method:'POST'});  // clear NEW badges after I've looked
+    loadJobs(); loadStats();
+  }
+}
+
+// ---- settings ----
+async function openSettings(){
+  const s = await (await fetch('/api/settings')).json();
+  $("#setRoles").value = (s.roles||[]).join(", ");
+  $("#setEmailAddr").value = s.email || "";
+  $("#setRemote").checked = !!s.include_remote;
+  $("#setEmail").checked = !!s.notify_email;
+  $("#setWa").checked = !!s.notify_whatsapp;
+  $("#setWaPhone").value = s.whatsapp_phone || "";
+  $("#setWaKey").value = s.whatsapp_apikey || "";
+  $("#settingsModal").classList.remove("hidden");
+}
+async function saveSettings(){
+  const split = v => v.split(",").map(x=>x.trim()).filter(Boolean);
+  const msg = $("#settingsMsg");
+  $("#saveSettings").disabled = true;
+  msg.className = "text-[11px] text-center text-slate-400"; msg.textContent = "Saving & searching Adzuna…";
+  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      roles: split($("#setRoles").value),
+      email: $("#setEmailAddr").value.trim(),
+      include_remote: $("#setRemote").checked,
+      notify_email: $("#setEmail").checked,
+      notify_whatsapp: $("#setWa").checked,
+      whatsapp_phone: $("#setWaPhone").value.trim(),
+      whatsapp_apikey: $("#setWaKey").value.trim(),
+    })});
+  await loadMe();
+  // instant role search via Adzuna
+  let added = 0;
+  try { const r = await (await fetch('/api/search-now',{method:'POST'})).json(); added = r.added||0; } catch {}
+  $("#saveSettings").disabled = false;
+  $("#settingsModal").classList.add("hidden");
+  loadJobs(); loadStats();
+}
+
+async function testAlert(){
+  const msg = $("#settingsMsg");
+  msg.className = "text-[11px] text-center text-slate-400"; msg.textContent = "Sending test alert…";
+  // save first so latest channel settings are used
+  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      notify_email: $("#setEmail").checked, email: $("#setEmailAddr").value.trim(),
+      notify_whatsapp: $("#setWa").checked,
+      whatsapp_phone: $("#setWaPhone").value.trim(), whatsapp_apikey: $("#setWaKey").value.trim(),
+    })});
+  let r = {};
+  try { r = await (await fetch('/api/test-alert',{method:'POST'})).json(); } catch { r = {}; }
+  const parts = [];
+  if (r.email) parts.push("Email: " + r.email);
+  if (r.whatsapp) parts.push("WhatsApp: " + r.whatsapp);
+  const ok = JSON.stringify(r).includes('"sent"');
+  msg.className = "text-[11px] text-center " + (ok ? "text-emerald-400" : "text-amber-400");
+  msg.textContent = parts.length ? parts.join(" · ") : "No channels enabled — tick Email or WhatsApp first.";
+}
+
+// ---- wire up ----
+$("#refreshBtn").onclick = refresh;
+$("#settingsBtn").onclick = openSettings;
+$("#closeSettings").onclick = () => $("#settingsModal").classList.add("hidden");
+$("#saveSettings").onclick = saveSettings;
+$("#testAlert").onclick = testAlert;
+$("#search").addEventListener("input", () => { clearTimeout(window._t); window._t=setTimeout(loadJobs,300); });
+$("#sourceFilter").onchange = loadJobs;
+document.querySelectorAll(".filter-chip").forEach(b => b.onclick = () => {
+  const k = b.dataset.filter; filters[k] = !filters[k];
+  b.classList.toggle("bg-blue-600", filters[k]);
+  b.classList.toggle("border-blue-500", filters[k]);
+  loadJobs();
+});
+
+(async () => { await loadMe(); loadStats(); loadJobs(); })();
+setInterval(() => { loadStats(); loadJobs(); }, 60000); // live refresh every minute
+
+// Register the service worker so the app is installable / works offline.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(()=>{}));
+}
+</script>
+</body>
+</html>
