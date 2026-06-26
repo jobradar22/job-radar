@@ -1,3 +1,13 @@
+---
+title: JobRadar
+emoji: 🛰️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # 🛰️ JobRadar
 
 A tiny, self-hosted **job aggregator** that pulls listings from multiple free job

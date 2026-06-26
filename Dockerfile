@@ -8,8 +8,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Render (and most hosts) inject $PORT; app/config.py reads it.
-ENV PORT=8000
-EXPOSE 8000
+# Hugging Face Spaces serves the container on port 7860 (app/config.py reads
+# $PORT). Other hosts that inject their own $PORT will override this.
+ENV PORT=7860
+# Spaces run as a non-root user; /tmp is always writable for the SQLite DB.
+ENV JOBRADAR_DB=/tmp/jobradar.db
+EXPOSE 7860
 
 CMD ["python", "-m", "app.main"]
