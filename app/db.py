@@ -1,59 +1,103 @@
-"""SQLite layer. Jobs are a global pool (fetched once for everyone); each user
-has their own role preference, saved/hidden state, and "last seen" marker."""
+"""Data layer. Works with two backends, chosen by env vars:
+  * Turso / libSQL (cloud, persistent)  — when TURSO_URL + TURSO_TOKEN are set
+  * local SQLite file                   — otherwise (local dev)
+Jobs are a global pool; each user has their own role preference, saved/hidden
+state, and "last seen" marker. All queries go through _query/_execute so both
+backends behave identically (rows always come back as plain dicts)."""
 import datetime as dt
-from contextlib import contextmanager
+import os
+import threading
 
 from . import auth, config
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    id          TEXT PRIMARY KEY,   -- stable hash of source+url
-    title       TEXT,
-    company     TEXT,
-    location    TEXT,
-    remote      INTEGER DEFAULT 0,
-    url         TEXT,
-    source      TEXT,
-    description TEXT,
-    posted_at   TEXT,
-    fetched_at  TEXT                 -- when we first saw it
-);
-CREATE INDEX IF NOT EXISTS idx_jobs_fetched ON jobs(fetched_at);
+TURSO_URL = os.getenv("TURSO_URL", "")
+TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
+USE_TURSO = bool(TURSO_URL and TURSO_TOKEN)
 
-CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    email         TEXT,
-    prefs         TEXT,              -- JSON (roles, include_remote, ...)
-    created_at    TEXT
-);
+_lock = threading.Lock()
+_client = None
 
-CREATE TABLE IF NOT EXISTS user_jobs (
-    user_id   INTEGER,
-    job_id    TEXT,
-    saved     INTEGER DEFAULT 0,
-    dismissed INTEGER DEFAULT 0,
-    PRIMARY KEY (user_id, job_id)
-);
-"""
+if USE_TURSO:
+    import libsql_client
+    # libsql-client speaks HTTP; normalize the libsql:// scheme to https://
+    _http_url = TURSO_URL.replace("libsql://", "https://")
+    _client = libsql_client.create_client_sync(url=_http_url, auth_token=TURSO_TOKEN)
+
+# Schema as individual statements (libSQL has no executescript).
+_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT,
+        remote INTEGER DEFAULT 0, url TEXT, source TEXT, description TEXT,
+        posted_at TEXT, fetched_at TEXT)""",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_fetched ON jobs(fetched_at)",
+    """CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, email TEXT, prefs TEXT, created_at TEXT)""",
+    """CREATE TABLE IF NOT EXISTS user_jobs (
+        user_id INTEGER, job_id TEXT, saved INTEGER DEFAULT 0,
+        dismissed INTEGER DEFAULT 0, PRIMARY KEY (user_id, job_id))""",
+]
 
 
-@contextmanager
-def get_conn():
+# --------------------------------------------------------- backend I/O ----
+def _sqlite_conn():
     import sqlite3
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _query(sql: str, params=()) -> list[dict]:
+    """Run a SELECT, return rows as a list of dicts."""
+    params = list(params)
+    if USE_TURSO:
+        with _lock:
+            rs = _client.execute(sql, params)
+        cols = rs.columns
+        return [dict(zip(cols, row)) for row in rs.rows]
+    conn = _sqlite_conn()
     try:
-        yield conn
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _execute(sql: str, params=()):
+    """Run a single write statement (autocommitted)."""
+    params = list(params)
+    if USE_TURSO:
+        with _lock:
+            _client.execute(sql, params)
+        return
+    conn = _sqlite_conn()
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _executemany(sql: str, rows: list):
+    """Bulk write — one batched round trip on Turso, executemany on SQLite."""
+    if not rows:
+        return
+    if USE_TURSO:
+        stmts = [libsql_client.Statement(sql, list(r)) for r in rows]
+        with _lock:
+            _client.batch(stmts)
+        return
+    conn = _sqlite_conn()
+    try:
+        conn.executemany(sql, [tuple(r) for r in rows])
         conn.commit()
     finally:
         conn.close()
 
 
 def init_db():
-    with get_conn() as conn:
-        conn.executescript(_SCHEMA)
+    for stmt in _SCHEMA:
+        _execute(stmt)
 
 
 def _now() -> str:
@@ -65,36 +109,32 @@ def create_user(username: str, password: str, email: str = "") -> dict | None:
     username = username.strip().lower()
     if not username or not password:
         return None
-    with get_conn() as conn:
-        exists = conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
-        if exists:
-            return None
-        conn.execute(
-            "INSERT INTO users(username, password_hash, email, prefs, created_at) VALUES(?,?,?,?,?)",
-            (username, auth.hash_password(password), email.strip(),
-             config.to_json(config.DEFAULT_PREFS), _now()),
-        )
+    if _query("SELECT 1 FROM users WHERE username=?", (username,)):
+        return None
+    _execute(
+        "INSERT INTO users(username, password_hash, email, prefs, created_at) VALUES(?,?,?,?,?)",
+        (username, auth.hash_password(password), email.strip(),
+         config.to_json(config.DEFAULT_PREFS), _now()),
+    )
     return get_user(username)
 
 
 def get_user(username: str) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username=?", (username.strip().lower(),)).fetchone()
-    return _user_row(row)
+    rows = _query("SELECT * FROM users WHERE username=?", (username.strip().lower(),))
+    return _user_row(rows[0]) if rows else None
 
 
 def get_user_by_id(user_id: int) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    return _user_row(row)
+    rows = _query("SELECT * FROM users WHERE id=?", (user_id,))
+    return _user_row(rows[0]) if rows else None
 
 
-def _user_row(row) -> dict | None:
+def _user_row(row: dict) -> dict | None:
     if not row:
         return None
     prefs = dict(config.DEFAULT_PREFS)
-    prefs.update(config.from_json(row["prefs"] or "{}"))
-    return {"id": row["id"], "username": row["username"], "email": row["email"] or "",
+    prefs.update(config.from_json(row.get("prefs") or "{}"))
+    return {"id": row["id"], "username": row["username"], "email": row.get("email") or "",
             "password_hash": row["password_hash"], "prefs": prefs}
 
 
@@ -106,23 +146,19 @@ def verify_user(username: str, password: str) -> dict | None:
 
 
 def all_users() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT id FROM users").fetchall()
-    return [get_user_by_id(r["id"]) for r in rows]
+    return [_user_row(r) for r in _query("SELECT * FROM users")]
 
 
 def update_prefs(user_id: int, new_prefs: dict) -> dict:
     u = get_user_by_id(user_id)
     prefs = u["prefs"]
     prefs.update(new_prefs)
-    with get_conn() as conn:
-        conn.execute("UPDATE users SET prefs=? WHERE id=?", (config.to_json(prefs), user_id))
+    _execute("UPDATE users SET prefs=? WHERE id=?", (config.to_json(prefs), user_id))
     return prefs
 
 
 def update_email(user_id: int, email: str):
-    with get_conn() as conn:
-        conn.execute("UPDATE users SET email=? WHERE id=?", (email.strip(), user_id))
+    _execute("UPDATE users SET email=? WHERE id=?", (email.strip(), user_id))
 
 
 def mark_seen(user_id: int):
@@ -132,37 +168,41 @@ def mark_seen(user_id: int):
 def set_user_job_flag(user_id: int, job_id: str, field: str, value: int):
     if field not in ("saved", "dismissed"):
         raise ValueError("invalid field")
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO user_jobs(user_id, job_id) VALUES(?,?) "
-            "ON CONFLICT(user_id, job_id) DO NOTHING",
-            (user_id, job_id),
-        )
-        conn.execute(f"UPDATE user_jobs SET {field}=? WHERE user_id=? AND job_id=?",
-                     (value, user_id, job_id))
+    _execute(
+        "INSERT INTO user_jobs(user_id, job_id) VALUES(?,?) "
+        "ON CONFLICT(user_id, job_id) DO NOTHING",
+        (user_id, job_id),
+    )
+    _execute(f"UPDATE user_jobs SET {field}=? WHERE user_id=? AND job_id=?",
+             (value, user_id, job_id))
 
 
 # -------------------------------------------------------------- jobs -----
+_INSERT_JOB = """INSERT INTO jobs
+    (id,title,company,location,remote,url,source,description,posted_at,fetched_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)"""
+
+
 def upsert_jobs(jobs: list[dict], now_iso: str) -> list[dict]:
     """Insert jobs we've never seen (already location-filtered). Returns new ones."""
-    new_jobs = []
-    with get_conn() as conn:
-        for j in jobs:
-            if conn.execute("SELECT 1 FROM jobs WHERE id=?", (j["id"],)).fetchone():
-                continue
-            conn.execute(
-                """INSERT INTO jobs
-                   (id,title,company,location,remote,url,source,description,posted_at,fetched_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (j["id"], j["title"], j["company"], j["location"],
-                 1 if j["remote"] else 0, j["url"], j["source"],
-                 j["description"], j["posted_at"], now_iso),
-            )
-            new_jobs.append(j)
-    return new_jobs
+    existing = {r["id"] for r in _query("SELECT id FROM jobs")}
+    seen, fresh = set(existing), []
+    for j in jobs:
+        if j["id"] in seen:
+            continue
+        seen.add(j["id"])
+        fresh.append(j)
+    rows = [
+        (j["id"], j["title"], j["company"], j["location"],
+         1 if j["remote"] else 0, j["url"], j["source"],
+         j["description"], j["posted_at"], now_iso)
+        for j in fresh
+    ]
+    _executemany(_INSERT_JOB, rows)
+    return fresh
 
 
-def _candidate_rows(user_id: int, query="", source=""):
+def _candidate_rows(user_id: int, query="", source="") -> list[dict]:
     sql = """SELECT j.*, COALESCE(uj.saved,0) saved, COALESCE(uj.dismissed,0) dismissed
              FROM jobs j
              LEFT JOIN user_jobs uj ON uj.job_id=j.id AND uj.user_id=?
@@ -176,5 +216,4 @@ def _candidate_rows(user_id: int, query="", source=""):
         sql += " AND j.source=?"
         params.append(source)
     sql += " ORDER BY j.fetched_at DESC, j.posted_at DESC LIMIT 2000"
-    with get_conn() as conn:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    return _query(sql, params)

@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 plyer==2.1.0
 itsdangerous==2.2.0
 python-multipart==0.0.20
+libsql-client==0.3.1
